@@ -132,6 +132,64 @@ def make_dirty(
 
     return x, stats
 
+from datetime import datetime, timezone
+from google.cloud import bigquery
+
+LOG_TABLE = f"{PROJECT_ID}.{DATASET}.etl_dirty_log"
+
+def ensure_log_table(client: bigquery.Client):
+    """監査ログ用テーブルを作成（なければ）"""
+    schema = [
+        bigquery.SchemaField("run_ts", "TIMESTAMP"),
+        bigquery.SchemaField("ticker", "STRING"),
+        bigquery.SchemaField("rows_before", "INT64"),
+        bigquery.SchemaField("rows_after", "INT64"),
+        bigquery.SchemaField("missing", "INT64"),
+        bigquery.SchemaField("outliers", "INT64"),
+        bigquery.SchemaField("duplicates", "INT64"),
+        bigquery.SchemaField("case_jitter", "INT64"),
+        bigquery.SchemaField("low_gt_high", "INT64"),
+        bigquery.SchemaField("future_rows", "INT64"),
+        bigquery.SchemaField("github_run_id", "STRING"),
+        bigquery.SchemaField("github_run_number", "STRING"),
+        bigquery.SchemaField("note", "STRING"),
+    ]
+    try:
+        client.create_table(bigquery.Table(LOG_TABLE, schema=schema))
+        log("Created log table (first time).")
+    except Exception:
+        pass
+
+def log_stats_to_bq(ticker: str, rows_before: int, rows_after: int, stats: dict, note: str = ""):
+    """汚し件数を BigQuery に1行追記"""
+    client = bigquery.Client(project=PROJECT_ID)
+    ensure_dataset_table(client)   # データセットが無い場合に備える
+    ensure_log_table(client)
+
+    payload = pd.DataFrame([{
+        "run_ts": datetime.now(timezone.utc),
+        "ticker": ticker,
+        "rows_before": int(rows_before),
+        "rows_after": int(rows_after),
+        "missing": int(stats.get("missing", 0)),
+        "outliers": int(stats.get("outliers", 0)),
+        "duplicates": int(stats.get("duplicates", 0)),
+        "case_jitter": int(stats.get("case_jitter", 0)),
+        "low_gt_high": int(stats.get("low_gt_high", 0)),
+        "future_rows": int(stats.get("future_rows", 0)),
+        # GitHub Actions から来るときは環境変数が入る（ローカル/Cloud Shell でも空でOK）
+        "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+        "github_run_number": os.environ.get("GITHUB_RUN_NUMBER", ""),
+        "note": note,
+    }])
+
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_APPEND",   # 追記
+        create_disposition="CREATE_IF_NEEDED",
+    )
+    client.load_table_from_dataframe(payload, LOG_TABLE, job_config=job_config).result()
+    log(f"Appended log row into {LOG_TABLE}")
+
 
 
 def ensure_dataset_table(client: bigquery.Client):
