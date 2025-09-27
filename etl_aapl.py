@@ -32,6 +32,105 @@ def get_last_1y(ticker: str) -> pd.DataFrame:
     log(f"Fetched rows: {len(df)}; head: {df.head(2).to_dict(orient='records')}")
     return df
 
+import numpy as np
+import random
+
+def make_dirty(
+    df: pd.DataFrame,
+    *,
+    miss_rate=0.01,         # 欠損（1%）
+    outlier_rate=0.01,      # 外れ値（1%）
+    dup_rate=0.01,          # 重複（1%）
+    case_rate=0.05,         # 表記ゆれ（5%）
+    swap_rate=0.01,         # Low>High 不整合（1%）
+    future_rows=5,          # 未来日付の注入行数
+    future_max_days=30      # 未来に最大+30日
+) -> pd.DataFrame:
+    x = df.copy()
+
+    n = len(x)
+    if n == 0:
+        return x
+
+    rng = np.random.default_rng(seed=int(pd.Timestamp.utcnow().timestamp()) % (2**32))
+    idx_all = np.arange(n)
+
+    # 1) 欠損（Open/High/Low/Close/VolumeのどれかをNaNに）
+    miss_cols = ["open","high","low","close","volume"]
+    k = max(1, int(n * miss_rate))
+    miss_rows = rng.choice(idx_all, size=min(k, n), replace=False)
+    for r in miss_rows:
+        c = rng.choice(miss_cols)
+        x.at[r, c] = np.nan
+
+    # 2) 外れ値（急騰 or 急落：closeを±3〜5倍、high/lowも崩す）
+    k = max(1, int(n * outlier_rate))
+    out_rows = rng.choice(idx_all, size=min(k, n), replace=False)
+    for r in out_rows:
+        mult = float(rng.choice([3, 4, 5, 1/3, 1/4, 1/5]))
+        if pd.notna(x.at[r, "close"]):
+            x.at[r, "close"] = x.at[r, "close"] * mult
+        if pd.notna(x.at[r, "open"]):
+            x.at[r, "open"] = x.at[r, "open"] * mult
+        # high/low を雑にずらす（不自然さを残すため）
+        if pd.notna(x.at[r, "high"]):
+            x.at[r, "high"] = x.at[r, "high"] * (mult * 0.9)
+        if pd.notna(x.at[r, "low"]):
+            x.at[r, "low"] = x.at[r, "low"] * (mult * 1.1)
+
+    # 3) 重複（ランダム行をそのまま複製して末尾に追加）
+    k = max(1, int(n * dup_rate))
+    dup_rows = rng.choice(idx_all, size=min(k, n), replace=False)
+    x = pd.concat([x, x.iloc[dup_rows].copy()], ignore_index=True)
+
+    # 4) 表記ゆれ（symbol を一部だけランダムな大小混在に）
+    k = max(1, int(len(x) * case_rate))
+    case_rows = rng.choice(np.arange(len(x)), size=min(k, len(x)), replace=False)
+    def jitter_case(s: str) -> str:
+        # ランダムに大小を混ぜる
+        return "".join(ch.upper() if random.random() < 0.5 else ch.lower() for ch in s)
+    for r in case_rows:
+        if isinstance(x.at[r, "symbol"], str):
+            x.at[r, "symbol"] = jitter_case(x.at[r, "symbol"])
+
+    # 5) 不整合（Low > High を意図的に発生）
+    k = max(1, int(len(x) * swap_rate))
+    swap_rows = rng.choice(np.arange(len(x)), size=min(k, len(x)), replace=False)
+    for r in swap_rows:
+        lo, hi = x.at[r, "low"], x.at[r, "high"]
+        if pd.notna(lo) and pd.notna(hi):
+            # low を少し持ち上げ、high を少し下げて逆転させる
+            x.at[r, "low"]  = lo * 1.05
+            x.at[r, "high"] = hi * 0.95
+            # 逆転していなければ強制スワップ
+            if pd.notna(x.at[r, "low"]) and pd.notna(x.at[r, "high"]) and x.at[r, "low"] <= x.at[r, "high"]:
+                x.at[r, "low"], x.at[r, "high"] = x.at[r, "high"] + 1e-6, x.at[r, "low"] - 1e-6
+
+    # 6) 未来日付（直近行をコピーして未来日に）
+    if future_rows > 0:
+        latest = x.sort_values("date").iloc[-1:].copy()
+        futs = []
+        for i in range(future_rows):
+            d = latest.copy()
+            add_days = int(rng.integers(1, future_max_days+1))
+            d["date"] = pd.to_datetime(d["date"]) + pd.to_timedelta(add_days, unit="D")
+            d["date"] = d["date"].dt.date
+            futs.append(d)
+        x = pd.concat([x] + futs, ignore_index=True)
+
+    # 型崩れの最終調整（BigQueryに入るように）
+    x["date"] = pd.to_datetime(x["date"], errors="coerce").dt.date
+    for c in ["open","high","low","close"]:
+        if c in x.columns:
+            x[c] = pd.to_numeric(x[c], errors="coerce").astype(float)
+    if "volume" in x.columns:
+        # pandas Int64 は NA サポート
+        x["volume"] = pd.to_numeric(x["volume"], errors="coerce").astype("Int64")
+
+    return x
+
+
+
 def ensure_dataset_table(client: bigquery.Client):
     log("Ensuring dataset/table exist...")
     # データセット作成（あればスキップ）
