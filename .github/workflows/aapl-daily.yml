@@ -1,0 +1,25 @@
+name: AAPL daily to BigQuery
+
+on:
+  schedule:
+    # GitHub Actions は UTC。JST 7:00 = UTC 22:00（前日）
+    - cron: "0 22 * * *"
+  workflow_dispatch: {}  # 手動実行ボタン
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install pandas yfinance google-cloud-bigquery pyarrow
+      - name: Write SA key file
+        run: echo '${{ secrets.GCP_SA_KEY }}' > $GITHUB_WORKSPACE/key.json
+      - name: ETL (AAPL -> BigQuery)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/key.json
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: python etl_aapl.py
