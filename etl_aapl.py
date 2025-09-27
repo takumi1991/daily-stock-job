@@ -38,10 +38,10 @@ import random
 def make_dirty(
     df: pd.DataFrame,
     *,
-    miss_rate=0.01,         # 欠損（1%）
+    miss_rate=0.2,         # 欠損（1%）
     outlier_rate=0.01,      # 外れ値（1%）
     dup_rate=0.01,          # 重複（1%）
-    case_rate=0.05,         # 表記ゆれ（5%）
+    case_rate=0.01,         # 表記ゆれ（5%）
     swap_rate=0.01,         # Low>High 不整合（1%）
     future_rows=5,          # 未来日付の注入行数
     future_max_days=30      # 未来に最大+30日
