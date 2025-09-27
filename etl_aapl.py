@@ -180,6 +180,10 @@ if __name__ == "__main__":
         df = get_last_1y("AAPL")
         if df.empty:
             raise SystemExit("No data fetched from yfinance")
+
+        # ← この位置で汚しを入れる
+        df = make_dirty(df)
+        
         load_upsert(df)
         log("DONE")
     except Exception as e:
