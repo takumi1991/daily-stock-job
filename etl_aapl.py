@@ -38,96 +38,99 @@ import random
 def make_dirty(
     df: pd.DataFrame,
     *,
-    miss_rate=0.2,         # 欠損（1%）
-    outlier_rate=0.01,      # 外れ値（1%）
-    dup_rate=0.01,          # 重複（1%）
-    case_rate=0.01,         # 表記ゆれ（5%）
-    swap_rate=0.01,         # Low>High 不整合（1%）
-    future_rows=5,          # 未来日付の注入行数
-    future_max_days=30      # 未来に最大+30日
-) -> pd.DataFrame:
+    miss_rate=0.2,
+    outlier_rate=0.01,
+    dup_rate=0.01,
+    case_rate=0.01,
+    swap_rate=0.01,
+    future_rows=5,
+    future_max_days=30
+) -> tuple[pd.DataFrame, dict]:
     x = df.copy()
+    stats = {
+        "missing": 0,
+        "outliers": 0,
+        "duplicates": 0,
+        "case_jitter": 0,
+        "low_gt_high": 0,
+        "future_rows": 0,
+    }
 
     n = len(x)
     if n == 0:
-        return x
+        return x, stats
 
     rng = np.random.default_rng(seed=int(pd.Timestamp.utcnow().timestamp()) % (2**32))
     idx_all = np.arange(n)
 
-    # 1) 欠損（Open/High/Low/Close/VolumeのどれかをNaNに）
+    # 1) 欠損
     miss_cols = ["open","high","low","close","volume"]
     k = max(1, int(n * miss_rate))
     miss_rows = rng.choice(idx_all, size=min(k, n), replace=False)
     for r in miss_rows:
         c = rng.choice(miss_cols)
         x.at[r, c] = np.nan
+        stats["missing"] += 1
 
-    # 2) 外れ値（急騰 or 急落：closeを±3〜5倍、high/lowも崩す）
+    # 2) 外れ値
     k = max(1, int(n * outlier_rate))
     out_rows = rng.choice(idx_all, size=min(k, n), replace=False)
     for r in out_rows:
+        stats["outliers"] += 1
         mult = float(rng.choice([3, 4, 5, 1/3, 1/4, 1/5]))
-        if pd.notna(x.at[r, "close"]):
-            x.at[r, "close"] = x.at[r, "close"] * mult
-        if pd.notna(x.at[r, "open"]):
-            x.at[r, "open"] = x.at[r, "open"] * mult
-        # high/low を雑にずらす（不自然さを残すため）
-        if pd.notna(x.at[r, "high"]):
-            x.at[r, "high"] = x.at[r, "high"] * (mult * 0.9)
-        if pd.notna(x.at[r, "low"]):
-            x.at[r, "low"] = x.at[r, "low"] * (mult * 1.1)
+        if pd.notna(x.at[r, "close"]): x.at[r, "close"] *= mult
+        if pd.notna(x.at[r, "open"]):  x.at[r, "open"] *= mult
+        if pd.notna(x.at[r, "high"]):  x.at[r, "high"] *= mult * 0.9
+        if pd.notna(x.at[r, "low"]):   x.at[r, "low"]  *= mult * 1.1
 
-    # 3) 重複（ランダム行をそのまま複製して末尾に追加）
+    # 3) 重複
     k = max(1, int(n * dup_rate))
     dup_rows = rng.choice(idx_all, size=min(k, n), replace=False)
-    x = pd.concat([x, x.iloc[dup_rows].copy()], ignore_index=True)
+    if len(dup_rows) > 0:
+        stats["duplicates"] = len(dup_rows)
+        x = pd.concat([x, x.iloc[dup_rows].copy()], ignore_index=True)
 
-    # 4) 表記ゆれ（symbol を一部だけランダムな大小混在に）
+    # 4) 表記ゆれ
     k = max(1, int(len(x) * case_rate))
     case_rows = rng.choice(np.arange(len(x)), size=min(k, len(x)), replace=False)
     def jitter_case(s: str) -> str:
-        # ランダムに大小を混ぜる
-        return "".join(ch.upper() if random.random() < 0.5 else ch.lower() for ch in s)
+        return "".join(ch.upper() if random.random()<0.5 else ch.lower() for ch in s)
     for r in case_rows:
-        if isinstance(x.at[r, "symbol"], str):
-            x.at[r, "symbol"] = jitter_case(x.at[r, "symbol"])
+        if isinstance(x.at[r,"symbol"], str):
+            x.at[r,"symbol"] = jitter_case(x.at[r,"symbol"])
+            stats["case_jitter"] += 1
 
-    # 5) 不整合（Low > High を意図的に発生）
+    # 5) Low>High
     k = max(1, int(len(x) * swap_rate))
     swap_rows = rng.choice(np.arange(len(x)), size=min(k, len(x)), replace=False)
     for r in swap_rows:
-        lo, hi = x.at[r, "low"], x.at[r, "high"]
+        lo, hi = x.at[r,"low"], x.at[r,"high"]
         if pd.notna(lo) and pd.notna(hi):
-            # low を少し持ち上げ、high を少し下げて逆転させる
-            x.at[r, "low"]  = lo * 1.05
-            x.at[r, "high"] = hi * 0.95
-            # 逆転していなければ強制スワップ
-            if pd.notna(x.at[r, "low"]) and pd.notna(x.at[r, "high"]) and x.at[r, "low"] <= x.at[r, "high"]:
-                x.at[r, "low"], x.at[r, "high"] = x.at[r, "high"] + 1e-6, x.at[r, "low"] - 1e-6
+            x.at[r,"low"], x.at[r,"high"] = hi+1e-6, lo-1e-6
+            stats["low_gt_high"] += 1
 
-    # 6) 未来日付（直近行をコピーして未来日に）
+    # 6) 未来日付
     if future_rows > 0:
         latest = x.sort_values("date").iloc[-1:].copy()
-        futs = []
+        futs=[]
         for i in range(future_rows):
-            d = latest.copy()
-            add_days = int(rng.integers(1, future_max_days+1))
-            d["date"] = pd.to_datetime(d["date"]) + pd.to_timedelta(add_days, unit="D")
-            d["date"] = d["date"].dt.date
+            d=latest.copy()
+            add_days=int(rng.integers(1,future_max_days+1))
+            d["date"]=pd.to_datetime(d["date"])+pd.to_timedelta(add_days,"D")
+            d["date"]=d["date"].dt.date
             futs.append(d)
-        x = pd.concat([x] + futs, ignore_index=True)
+        x=pd.concat([x]+futs,ignore_index=True)
+        stats["future_rows"]=len(futs)
 
-    # 型崩れの最終調整（BigQueryに入るように）
+    # 型を整える
     x["date"] = pd.to_datetime(x["date"], errors="coerce").dt.date
     for c in ["open","high","low","close"]:
         if c in x.columns:
             x[c] = pd.to_numeric(x[c], errors="coerce").astype(float)
     if "volume" in x.columns:
-        # pandas Int64 は NA サポート
         x["volume"] = pd.to_numeric(x["volume"], errors="coerce").astype("Int64")
 
-    return x
+    return x, stats
 
 
 
