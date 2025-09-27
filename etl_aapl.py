@@ -74,18 +74,13 @@ def load_upsert(df: pd.DataFrame):
         df, STAGING,
         job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     ).result()
-    log("MERGE into target...")
-    client.query(f"""
-      MERGE `{TARGET}` T
-      USING `{STAGING}` S
-      ON T.symbol=S.symbol AND T.date=S.date
-      WHEN MATCHED THEN UPDATE SET
-        open=S.open, high=S.high, low=S.low, close=S.close, volume=S.volume
-      WHEN NOT MATCHED THEN
-        INSERT (symbol,date,open,high,low,close,volume)
-        VALUES (S.symbol,S.date,S.open,S.high,S.low,S.close,S.volume)
-    """).result()
-    log(f"Upserted rows: {len(df)}")
+        log("Loading directly into target (truncate)...")
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_TRUNCATE",
+        schema=schema
+    )
+    client.load_table_from_dataframe(df, TARGET, job_config=job_config).result()
+    log(f"Replaced table with {len(df)} rows")
 
 if __name__ == "__main__":
     try:
