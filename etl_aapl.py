@@ -185,7 +185,9 @@ if __name__ == "__main__":
             raise SystemExit("No data fetched from yfinance")
 
         # ← この位置で汚しを入れる
-        df = make_dirty(df)
+        df_dirty, stats = make_dirty(df)
+
+    　　log(f"Injected dirt: {stats}")
         
         load_upsert(df)
         log("DONE")
