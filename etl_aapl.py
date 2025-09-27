@@ -66,15 +66,9 @@ def load_upsert(df: pd.DataFrame):
         bigquery.SchemaField("close","FLOAT"),
         bigquery.SchemaField("volume","INT64"),
     ]
-    # staging作成 or 置換
-    try: client.create_table(bigquery.Table(STAGING, schema=schema))
-    except Exception: pass
-    log("Loading into staging (truncate)...")
-    client.load_table_from_dataframe(
-        df, STAGING,
-        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    ).result()
-        log("Loading directly into target (truncate)...")
+
+    # 本番テーブルに直接上書きロード（MERGE禁止のため）
+    log("Loading directly into target (truncate)...")
     job_config = bigquery.LoadJobConfig(
         write_disposition="WRITE_TRUNCATE",
         schema=schema
