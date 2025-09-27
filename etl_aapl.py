@@ -21,22 +21,44 @@ def get_last_1y(ticker: str) -> pd.DataFrame:
 
 def load_to_bq(df: pd.DataFrame):
     client = bigquery.Client(project=PROJECT_ID)
-    table_id = f"{PROJECT_ID}.{DATASET}.{TABLE}"
-    job_config = bigquery.LoadJobConfig(
-        schema=[
-            bigquery.SchemaField("symbol","STRING"),
-            bigquery.SchemaField("date","DATE"),
-            bigquery.SchemaField("open","FLOAT"),
-            bigquery.SchemaField("high","FLOAT"),
-            bigquery.SchemaField("low","FLOAT"),
-            bigquery.SchemaField("close","FLOAT"),
-            bigquery.SchemaField("volume","INT64"),
-        ],
-        write_disposition="WRITE_APPEND",
-        create_disposition="CREATE_IF_NEEDED",
-    )
-    client.load_table_from_dataframe(df, table_id, job_config=job_config).result()
-    print(f"Loaded {len(df)} rows into {table_id}")
+    target = f"{PROJECT_ID}.{DATASET}.{TABLE}"
+    staging = f"{target}__staging"
+
+    schema = [
+        bigquery.SchemaField("symbol","STRING"),
+        bigquery.SchemaField("date","DATE"),
+        bigquery.SchemaField("open","FLOAT"),
+        bigquery.SchemaField("high","FLOAT"),
+        bigquery.SchemaField("low","FLOAT"),
+        bigquery.SchemaField("close","FLOAT"),
+        bigquery.SchemaField("volume","INT64"),
+    ]
+
+    # ステージングテーブルを作成（なければ）
+    try:
+        client.create_table(bigquery.Table(staging, schema=schema))
+    except Exception:
+        pass
+
+    # ステージングを毎回リセットしてロード
+    client.load_table_from_dataframe(
+        df, staging,
+        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    ).result()
+
+    # 本番テーブルへ MERGE（UPSERT）
+    client.query(f"""
+      MERGE `{target}` T
+      USING `{staging}` S
+      ON T.symbol=S.symbol AND T.date=S.date
+      WHEN MATCHED THEN UPDATE SET
+        open=S.open, high=S.high, low=S.low, close=S.close, volume=S.volume
+      WHEN NOT MATCHED THEN
+        INSERT (symbol,date,open,high,low,close,volume)
+        VALUES (S.symbol,S.date,S.open,S.high,S.low,S.close,S.volume)
+    """).result()
+
+    print(f"Upserted {len(df)} rows into {target}")
 
 if __name__ == "__main__":
     d = get_last_1y("AAPL")
