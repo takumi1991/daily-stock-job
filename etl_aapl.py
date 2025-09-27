@@ -236,18 +236,89 @@ def load_upsert(df: pd.DataFrame):
     client.load_table_from_dataframe(df, TARGET, job_config=job_config).result()
     log(f"Replaced table with {len(df)} rows")
 
+from google.cloud import bigquery
+from datetime import datetime, timezone
+
+LOG_TABLE = "etl_run_log"  # 監査テーブル名
+
+def save_run_log(
+    client: bigquery.Client,
+    project_id: str,
+    dataset: str,
+    stats: dict,
+    *,
+    symbol: str,
+    rows_before: int,
+    rows_after_dirty: int,
+    source: str = "yfinance",
+    run_id: str | None = None,
+):
+    """汚し件数などの監査ログを BQ に1行追記（サンドボックス対応：WRITE_APPEND）"""
+    table_id = f"{project_id}.{dataset}.{LOG_TABLE}"
+
+    # スキーマ定義（存在しなければ create + append）
+    schema = [
+        bigquery.SchemaField("run_ts", "TIMESTAMP"),
+        bigquery.SchemaField("run_id", "STRING"),
+        bigquery.SchemaField("source", "STRING"),
+        bigquery.SchemaField("symbol", "STRING"),
+        bigquery.SchemaField("rows_before", "INT64"),
+        bigquery.SchemaField("rows_after_dirty", "INT64"),
+        bigquery.SchemaField("missing", "INT64"),
+        bigquery.SchemaField("outliers", "INT64"),
+        bigquery.SchemaField("duplicates", "INT64"),
+        bigquery.SchemaField("case_jitter", "INT64"),
+        bigquery.SchemaField("low_gt_high", "INT64"),
+        bigquery.SchemaField("future_rows", "INT64"),
+    ]
+    try:
+        client.create_table(bigquery.Table(table_id, schema=schema))
+    except Exception:
+        pass  # 既にあればスキップ
+
+    row = [{
+        "run_ts": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id or os.getenv("GITHUB_RUN_ID") or "",
+        "source": source,
+        "symbol": symbol,
+        "rows_before": int(rows_before),
+        "rows_after_dirty": int(rows_after_dirty),
+        "missing": int(stats.get("missing", 0)),
+        "outliers": int(stats.get("outliers", 0)),
+        "duplicates": int(stats.get("duplicates", 0)),
+        "case_jitter": int(stats.get("case_jitter", 0)),
+        "low_gt_high": int(stats.get("low_gt_high", 0)),
+        "future_rows": int(stats.get("future_rows", 0)),
+    }]
+
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_json(row, table_id, job_config=job_config)
+    job.result()
+    print(f"[ETL] Logged run to {table_id}: {row[0]}")
+
+
 if __name__ == "__main__":
     try:
         df = get_last_1y("AAPL")
         if df.empty:
             raise SystemExit("No data fetched from yfinance")
 
-        # ← この位置で汚しを入れる
-        df_dirty, stats = make_dirty(df)
+        rows_before = len(df)
+        df_dirty, stats = make_dirty(df)  # ← 件数付きで受け取る
+        log(f"Injected dirt: {stats}")
 
-    　　log(f"Injected dirt: {stats}")
-        
-        load_upsert(df)
+        # 保存（WRITE_TRUNCATEで本体テーブルを置換）
+        load_upsert(df_dirty)
+
+        # 監査ログを追記
+        bq_client = bigquery.Client(project=PROJECT_ID)
+        save_run_log(
+            bq_client, PROJECT_ID, DATASET, stats,
+            symbol="AAPL",
+            rows_before=rows_before,
+            rows_after_dirty=len(df_dirty),
+        )
+
         log("DONE")
     except Exception as e:
         log("ERROR occurred:")
